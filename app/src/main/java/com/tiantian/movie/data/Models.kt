@@ -38,3 +38,9 @@ data class VodClass(
     val typeId: String,
     val typeName: String,
 )
+
+/** 父分类（TVBox 式两级：父分类一行，选中后显示子分类一行） */
+data class Category(
+    val name: String,
+    val children: List<VodClass>,
+)

@@ -26,6 +26,7 @@ object Api {
         val items: List<Vod>,
         val pageCount: Int,
         val classes: List<VodClass>,
+        val categories: List<Category>,
     )
 
     private fun get(url: String): String? {
@@ -55,10 +56,10 @@ object Api {
         val sb = StringBuilder(base).append("?ac=list&pg=").append(page)
         if (!typeId.isNullOrEmpty()) sb.append("&t=").append(enc(typeId))
         if (!keyword.isNullOrEmpty()) sb.append("&wd=").append(enc(keyword))
-        val body = get(sb.toString()) ?: return ListResult(emptyList(), 0, emptyList())
+        val body = get(sb.toString()) ?: return ListResult(emptyList(), 0, emptyList(), emptyList())
         return try {
             val root = JSONObject(body)
-            if (root.optInt("code", 0) != 1) return ListResult(emptyList(), 0, emptyList())
+            if (root.optInt("code", 0) != 1) return ListResult(emptyList(), 0, emptyList(), emptyList())
             val pageCount = root.optInt("pagecount", 1)
             val classes = mutableListOf<VodClass>()
             val classArr = root.optJSONArray("class")
@@ -68,8 +69,9 @@ object Api {
                     classes.add(VodClass(c.optString("type_id"), c.optString("type_name")))
                 }
             }
+            val categories = buildCategories(classes)
             val items = mutableListOf<Vod>()
-            val listArr = root.optJSONArray("list") ?: return ListResult(emptyList(), pageCount, classes)
+            val listArr = root.optJSONArray("list") ?: return ListResult(emptyList(), pageCount, classes, categories)
             for (i in 0 until listArr.length()) {
                 val o = listArr.getJSONObject(i)
                 items.add(
@@ -88,10 +90,87 @@ object Api {
                     )
                 )
             }
-            ListResult(items, pageCount, classes)
+            ListResult(items, pageCount, classes, categories)
         } catch (_: Exception) {
-            ListResult(emptyList(), 0, emptyList())
+            ListResult(emptyList(), 0, emptyList(), emptyList())
         }
+    }
+
+    /**
+     * 把扁平的 class 列表整理成 TVBox 式「父分类 + 子分类」两级结构。
+     *
+     * 各采集源 type_id 编号规则不统一，但分类名高度一致，因此按名称匹配：
+     *  - 父分类（占位、不直接挂片）：电影/连续剧/电视剧/综艺/动漫
+     *  - 子分类（真正挂片）：动作片/国产剧/大陆综艺/国产动漫 等
+     * 归类不进的子分类统一放进「其他」。
+     */
+    private fun buildCategories(classes: List<VodClass>): List<Category> {
+        if (classes.isEmpty()) return emptyList()
+        // 父分类定义：name -> (匹配自身的正则, 子分类关键词列表)
+        data class Parent(val name: String, val selfRe: Regex, val childKeys: List<String>)
+        val parents = listOf(
+            Parent("电影", Regex("^(电影|电影片)$"), listOf(
+                "动作片", "喜剧片", "爱情片", "科幻片", "恐怖片", "剧情片", "战争片",
+                "惊悚片", "灾难片", "悬疑片", "犯罪片", "奇幻片", "古装片", "历史片",
+                "家庭片", "家庭篇", "西部片", "伦理", "理论片", "纪录片", "记录片", "短片"
+            )),
+            Parent("连续剧", Regex("^(连续剧|电视剧|剧集)$"), listOf(
+                "国产剧", "内地剧", "香港剧", "港剧", "韩国剧", "韩剧", "欧美剧",
+                "日本剧", "日剧", "台湾剧", "台剧", "泰国剧", "泰剧", "海外剧", "马泰剧"
+            )),
+            Parent("综艺", Regex("^(综艺|综艺片)$"), listOf(
+                "大陆综艺", "港台综艺", "日韩综艺", "欧美综艺", "演唱会"
+            )),
+            Parent("动漫", Regex("^(动漫|动漫片)$"), listOf(
+                "国产动漫", "日韩动漫", "欧美动漫", "港台动漫", "海外动漫", "中国动漫", "日本动漫",
+                "动画片", "动画电影", "动漫电影", "里番动漫", "有声动漫"
+            )),
+        )
+
+        // 先识别父分类节点
+        val parentIdx = mutableMapOf<String, Int>()  // typeId -> parents 下标
+        val used = mutableSetOf<String>()            // 已归类的 typeId
+        val parentChildren = mutableListOf<MutableList<VodClass>>()
+        parents.forEachIndexed { pi, p ->
+            parentChildren.add(mutableListOf())
+        }
+
+        for (c in classes) {
+            for (pi in parents.indices) {
+                if (parents[pi].selfRe.matches(c.typeName)) {
+                    parentIdx[c.typeId] = pi
+                    used.add(c.typeId)
+                    break
+                }
+            }
+        }
+
+        // 归类子分类
+        val others = mutableListOf<VodClass>()
+        for (c in classes) {
+            if (c.typeId in used) continue  // 父分类自身跳过
+            var matched = false
+            for (pi in parents.indices) {
+                if (parents[pi].childKeys.any { c.typeName.contains(it) || it.contains(c.typeName) }) {
+                    parentChildren[pi].add(c)
+                    used.add(c.typeId)
+                    matched = true
+                    break
+                }
+            }
+            if (!matched) others.add(c)
+        }
+
+        val result = mutableListOf<Category>()
+        for (pi in parents.indices) {
+            val name = parents[pi].name
+            // 如果该源没有这个父分类节点，但只要它有匹配的子分类，也建组
+            if (parentChildren[pi].isNotEmpty() || parentIdx.values.any { it == pi }) {
+                result.add(Category(name, parentChildren[pi]))
+            }
+        }
+        if (others.isNotEmpty()) result.add(Category("其他", others))
+        return result
     }
 
     /** 详情 + 播放线路/选集 */
