@@ -19,8 +19,23 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # 手动安装 Android SDK 命令行工具（不依赖第三方 setup-android action）
+      - name: Install Android SDK cmdline-tools
+        run: |
+          mkdir -p $HOME/android-sdk/cmdline-tools
+          cd $HOME/android-sdk/cmdline-tools
+          curl -sSLo tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q tools.zip
+          mv cmdline-tools latest
+          ls -la
+
+      - name: Install SDK packages
+        run: |
+          export ANDROID_HOME=$HOME/android-sdk
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null 2>&1 || true
+          echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
 
       - name: Grant gradlew execute permission
         run: chmod +x gradlew
@@ -36,6 +51,8 @@ jobs:
             ${{ runner.os }}-gradle-
 
       - name: Build APK
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
         run: ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK
@@ -43,9 +60,3 @@ jobs:
         with:
           name: ZeroTV-debug
           path: app/build/outputs/apk/debug/*.apk
-
-      - name: Upload Release APK (on tag)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ZeroTV-release
-          path: app/build/outputs/apk/release/*.apk
